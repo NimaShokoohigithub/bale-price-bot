@@ -24,4 +24,4 @@ jobs:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           BALE_CHANNEL_ID: ${{ secrets.BALE_CHANNEL_ID }}
           BRSAPI_KEY: ${{ secrets.BRSAPI_KEY }}
-        run: python bot_github.py
+        run: python get_channel_id.py
