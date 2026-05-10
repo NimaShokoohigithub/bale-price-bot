@@ -17,11 +17,10 @@ jobs:
           python-version: '3.11'
       
       - name: Install dependencies
-        run: pip install balethon aiohttp
+        run: pip install balethon aiohttp jdatetime
       
       - name: Run bot
         env:
           BALE_BOT_TOKEN: ${{ secrets.BALE_BOT_TOKEN }}
           BALE_CHANNEL_ID: ${{ secrets.BALE_CHANNEL_ID }}
-          BRSAPI_KEY: ${{ secrets.BRSAPI_KEY }}
         run: python bot_github.py
