@@ -2,13 +2,17 @@
 import os
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from balethon import Client
 import aiohttp
+import jdatetime
 
 # Environment variables
 BOT_TOKEN = os.environ.get("BALE_BOT_TOKEN")
 CHANNEL_ID = os.environ.get("BALE_CHANNEL_ID", "@nsprice")
+
+# Tehran timezone (UTC+3:30)
+TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -17,74 +21,176 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def fetch_nobitex_orderbook(session):
-    """دریافت اردربوک از نوبیتکس - API عمومی بدون نیاز به توکن"""
-    symbols = ['BTCIRT', 'ETHIRT', 'USDTIRT']
-    results = {}
+async def fetch_nobitex_stats(session):
+    """دریافت آمار بیت‌کوین و تتر از نوبیتکس"""
+    url = "https://api.nobitex.ir/market/stats"
+    params = {
+        "srcCurrency": "btc,usdt",
+        "dstCurrency": "rls"
+    }
     
-    for symbol in symbols:
-        url = f"https://apiv2.nobitex.ir/v3/orderbook/{symbol}"
-        try:
-            async with session.get(url, timeout=15) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get('status') == 'ok':
-                        results[symbol] = {
-                            'lastTradePrice': data.get('lastTradePrice', '0'),
-                            'lastUpdate': data.get('lastUpdate', 0)
-                        }
-                        logger.info(f"دریافت {symbol}: {data.get('lastTradePrice')}")
-                else:
-                    logger.warning(f"خطا در دریافت {symbol}: {response.status}")
-        except Exception as e:
-            logger.warning(f"خطا در درخواست {symbol}: {e}")
-    
-    return results if results else None
-
-
-def format_price_toman(price_rial):
-    """تبدیل ریال به تومان با فرمت فارسی"""
     try:
-        value = int(float(price_rial)) // 10
+        async with session.get(url, params=params, timeout=15) as response:
+            if response.status == 200:
+                data = await response.json()
+                if data.get('status') == 'ok':
+                    logger.info("دریافت آمار نوبیتکس موفق")
+                    return data.get('stats', {})
+            logger.warning(f"خطا در نوبیتکس: {response.status}")
+            return None
+    except Exception as e:
+        logger.warning(f"خطا در نوبیتکس: {e}")
+        return None
+
+
+async def fetch_gold_silver(session):
+    """دریافت قیمت طلا و نقره از bonbast"""
+    url = "https://www.tgju.org/profile/price_dollar_rl/api/data"
+    
+    # تلاش با API مستقیم tgju
+    apis = [
+        "https://api.accessban.com/v1/access/jalali/currency",
+        "https://brsapi.ir/FreeTsetmcBourseApi/Api_Free_Gold_Currency_v2.json"
+    ]
+    
+    # روش جایگزین: scrape از tgju
+    try:
+        # API برای قیمت طلا
+        gold_url = "https://www.tgju.org/profile/gol18"
+        async with session.get(gold_url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'}) as response:
+            if response.status == 200:
+                text = await response.text()
+                logger.info("صفحه طلا دریافت شد")
+    except Exception as e:
+        logger.warning(f"خطا در دریافت طلا: {e}")
+    
+    # استفاده از API navasan
+    try:
+        url = "https://api.navasan.tech/latest/?api_key=freeNkhL4HM7fLqaZqxPaJvqbNqfPMne"
+        async with session.get(url, timeout=15) as response:
+            if response.status == 200:
+                data = await response.json()
+                logger.info("دریافت navasan موفق")
+                return data
+            logger.warning(f"navasan: {response.status}")
+    except Exception as e:
+        logger.warning(f"خطا در navasan: {e}")
+    
+    return None
+
+
+def format_price_toman(price_rial, is_rial=True):
+    """تبدیل به تومان با فرمت فارسی"""
+    try:
+        value = int(float(price_rial))
+        if is_rial:
+            value = value // 10
         formatted = f"{value:,}".replace(',', '٬')
         return formatted
     except:
         return str(price_rial)
 
 
+def format_change(day_change):
+    """فرمت درصد تغییرات با ایموجی"""
+    try:
+        change = float(day_change)
+        if change > 0:
+            return f"📈 +{change:.2f}%"
+        elif change < 0:
+            return f"📉 {change:.2f}%"
+        else:
+            return "➖ بدون تغییر"
+    except:
+        return ""
+
+
+def get_tehran_time():
+    """دریافت زمان به وقت تهران"""
+    return datetime.now(TEHRAN_TZ)
+
+
+def get_persian_date():
+    """دریافت تاریخ شمسی"""
+    now = get_tehran_time()
+    jalali = jdatetime.datetime.fromgregorian(datetime=now)
+    return jalali
+
+
 async def create_message():
     """ساخت پیام قیمت‌ها"""
     async with aiohttp.ClientSession() as session:
-        orderbook_data = await fetch_nobitex_orderbook(session)
+        # دریافت داده‌ها به صورت همزمان
+        nobitex_data, gold_data = await asyncio.gather(
+            fetch_nobitex_stats(session),
+            fetch_gold_silver(session)
+        )
         
-        if not orderbook_data:
+        lines = []
+        lines.append("💹 نرخ لحظه‌ای بازار")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("")
+        
+        has_data = False
+        
+        # نقره
+        if gold_data and 'silver' in gold_data:
+            has_data = True
+            silver = gold_data['silver']
+            price = silver.get('value', 0)
+            lines.append("🥈 نقره")
+            lines.append(f"   قیمت: {format_price_toman(price, is_rial=False)} تومان")
+            lines.append("")
+        
+        # طلای 18 عیار
+        if gold_data and 'gol18' in gold_data:
+            has_data = True
+            gold = gold_data['gol18']
+            price = gold.get('value', 0)
+            lines.append("🥇 طلای ۱۸ عیار")
+            lines.append(f"   قیمت: {format_price_toman(price, is_rial=False)} تومان")
+            lines.append("")
+        
+        # بیت‌کوین
+        if nobitex_data and 'btc-rls' in nobitex_data:
+            has_data = True
+            btc = nobitex_data['btc-rls']
+            price = btc.get('latest', '0')
+            day_change = btc.get('dayChange', '0')
+            change_str = format_change(day_change)
+            
+            lines.append("🟠 بیت‌کوین (BTC)")
+            lines.append(f"   قیمت: {format_price_toman(price)} تومان")
+            if change_str:
+                lines.append(f"   تغییر: {change_str}")
+            lines.append("")
+        
+        # تتر (دلار)
+        if nobitex_data and 'usdt-rls' in nobitex_data:
+            has_data = True
+            usdt = nobitex_data['usdt-rls']
+            price = usdt.get('latest', '0')
+            day_change = usdt.get('dayChange', '0')
+            change_str = format_change(day_change)
+            
+            lines.append("💵 دلار (تتر USDT)")
+            lines.append(f"   قیمت: {format_price_toman(price)} تومان")
+            if change_str:
+                lines.append(f"   تغییر: {change_str}")
+            lines.append("")
+        
+        if not has_data:
             logger.error("هیچ داده‌ای دریافت نشد")
             return None
         
-        crypto_info = {
-            'BTCIRT': ('بیت‌کوین', 'BTC'),
-            'ETHIRT': ('اتریوم', 'ETH'),
-            'USDTIRT': ('تتر', 'USDT'),
-        }
-        
-        lines = []
-        lines.append("📊 قیمت لحظه‌ای ارزهای دیجیتال")
-        lines.append("═" * 28)
+        # زمان به وقت تهران و تاریخ شمسی
+        now = get_tehran_time()
+        jalali = get_persian_date()
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"🕐 {now.strftime('%H:%M')} به وقت تهران")
+        lines.append(f"📅 {jalali.strftime('%Y/%m/%d')}")
         lines.append("")
-        
-        for symbol, (name_fa, name_en) in crypto_info.items():
-            if symbol in orderbook_data:
-                price = orderbook_data[symbol].get('lastTradePrice', '0')
-                price_formatted = format_price_toman(price)
-                lines.append(f"💎 {name_fa} ({name_en})")
-                lines.append(f"   💰 {price_formatted} تومان")
-                lines.append("")
-        
-        now = datetime.now()
-        lines.append("═" * 28)
-        lines.append(f"🕐 {now.strftime('%H:%M')} | 📅 {now.strftime('%Y/%m/%d')}")
-        lines.append("📡 منبع: نوبیتکس")
-        lines.append("🤖 @nsprice")
+        lines.append("🔔 @nsprice")
         
         return "\n".join(lines)
 
