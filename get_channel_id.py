@@ -1,19 +1,15 @@
-import os
-import asyncio
 from balethon import Client
+from balethon.handlers import MessageHandler
 
-BOT_TOKEN = os.environ.get("BALE_BOT_TOKEN")
+BOT_TOKEN = "توکن_بات_خودت"
 
-async def main():
-    client = Client(BOT_TOKEN)
-    
-    async with client:
-        try:
-            chat = await client.get_chat("nsprice")
-            print(f"CHANNEL_ID: {chat.id}")
-            print(f"Title: {chat.title}")
-        except Exception as e:
-            print(f"Error: {e}")
+client = Client(BOT_TOKEN)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+@client.on(MessageHandler())
+async def handle(client, message):
+    text = f"Chat ID: {message.chat.id}"
+    if message.forward_from_chat:
+        text += f"\nForward from: {message.forward_from_chat.id}"
+    await message.reply(text)
+
+client.run()
