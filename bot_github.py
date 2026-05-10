@@ -9,8 +9,6 @@ import aiohttp
 # تنظیمات از environment variables
 BOT_TOKEN = os.environ.get("BALE_BOT_TOKEN")
 CHANNEL_ID = os.environ.get("BALE_CHANNEL_ID", "@nsprice")
-API_KEY = os.environ.get("BRSAPI_KEY")
-API_BASE_URL = "https://brsapi.ir/api/v1"
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -19,97 +17,148 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def fetch_price(session, endpoint):
-    """دریافت قیمت از API"""
-    url = f"{API_BASE_URL}/{endpoint}"
-    headers = {"api_key": API_KEY}
+async def fetch_nobitex_stats(session):
+    """دریافت آمار بازار از نوبیتکس (بدون نیاز به توکن)"""
+    url = "https://api.nobitex.ir/market/stats"
+    
+    params = {
+        "srcCurrency": "btc,eth,usdt,trx,doge",
+        "dstCurrency": "rls"
+    }
     
     try:
-        async with session.get(url, headers=headers, timeout=10) as response:
+        async with session.get(url, params=params, timeout=15) as response:
             if response.status == 200:
                 data = await response.json()
-                return data
-            else:
-                logger.error(f"خطا در دریافت داده از {endpoint}: {response.status}")
-                return None
+                if data.get('status') == 'ok':
+                    return data.get('stats', {})
+            logger.error(f"خطا در دریافت داده نوبیتکس: {response.status}")
+            return None
     except Exception as e:
-        logger.error(f"خطا در درخواست API ({endpoint}): {e}")
+        logger.error(f"خطا در درخواست API نوبیتکس: {e}")
         return None
 
 
-def format_price(price):
-    """فرمت کردن قیمت با جداکننده"""
-    return f"{int(price):,}".replace(',', '٬')
+async def fetch_global_prices(session):
+    """دریافت قیمت طلا و دلار از API"""
+    url = "https://api.navasan.tech/latest/?api_key=freeNkhL4HM7fLqaZqxPaJvqbNqfPMne"
+    
+    try:
+        async with session.get(url, timeout=15) as response:
+            if response.status == 200:
+                return await response.json()
+            logger.warning(f"API navasan: {response.status}")
+            return None
+    except Exception as e:
+        logger.warning(f"خطا در navasan: {e}")
+        return None
 
 
-def format_change(change_percent):
-    """فرمت کردن درصد تغییرات"""
-    change = float(change_percent)
-    if change > 0:
-        return f"📈 افزایش: {change:.2f}%"
-    elif change < 0:
-        return f"📉 کاهش: {abs(change):.2f}%"
-    else:
-        return "➡️ بدون تغییر"
+def format_price(price, is_rial=True):
+    """فرمت کردن قیمت"""
+    try:
+        value = int(float(price))
+        if is_rial:
+            value = value // 10
+        formatted = f"{value:,}".replace(',', '٬')
+        return formatted
+    except:
+        return str(price)
+
+
+def format_change(day_change):
+    """فرمت کردن تغییرات"""
+    try:
+        change = float(day_change)
+        if change > 0:
+            return f"📈 +{change:.2f}%"
+        elif change < 0:
+            return f"📉 {change:.2f}%"
+        else:
+            return "➖ بدون تغییر"
+    except:
+        return "➖"
 
 
 async def create_message():
     """ساخت پیام با اطلاعات قیمت‌ها"""
     async with aiohttp.ClientSession() as session:
-        # دریافت قیمت‌ها
-        gold_data = await fetch_price(session, "gold/geram18/1")
-        silver_data = await fetch_price(session, "gold/silver/1")
-        dollar_data = await fetch_price(session, "currency/usd/1")
-        
-        if not all([gold_data, silver_data, dollar_data]):
-            logger.warning("برخی داده‌ها دریافت نشدند")
-            return None
+        nobitex_data, global_data = await asyncio.gather(
+            fetch_nobitex_stats(session),
+            fetch_global_prices(session)
+        )
         
         message_parts = []
         
-        # پردازش طلا
-        if gold_data and gold_data.get('status') == 'success':
-            gold = gold_data['data']
-            price = int(gold['price'])
-            change = gold.get('change_percent', '0')
+        if nobitex_data:
+            crypto_names = {
+                'btc-rls': ('₿ بیت‌کوین', 'BTC'),
+                'eth-rls': ('⟠ اتریوم', 'ETH'),
+                'usdt-rls': ('💲 تتر', 'USDT'),
+                'trx-rls': ('🔷 ترون', 'TRX'),
+                'doge-rls': ('🐕 دوج‌کوین', 'DOGE')
+            }
             
-            message_parts.append(
-                f"🪙 طلای ۱۸ عیار\n"
-                f"💰 قیمت لحظه‌ای: {format_price(price)} تومان\n"
-                f"{format_change(change)}"
-            )
+            crypto_parts = []
+            for key, (name, symbol) in crypto_names.items():
+                if key in nobitex_data:
+                    stats = nobitex_data[key]
+                    latest = stats.get('latest', '0')
+                    day_change = stats.get('dayChange', '0')
+                    
+                    crypto_parts.append(
+                        f"{name} ({symbol})\n"
+                        f"💰 {format_price(latest)} تومان\n"
+                        f"{format_change(day_change)}"
+                    )
+            
+            if crypto_parts:
+                message_parts.append("🔐 **ارزهای دیجیتال**\n\n" + "\n\n".join(crypto_parts))
         
-        # پردازش نقره
-        if silver_data and silver_data.get('status') == 'success':
-            silver = silver_data['data']
-            price = int(silver['price'])
-            change = silver.get('change_percent', '0')
+        if global_data:
+            market_parts = []
             
-            message_parts.append(
-                f"⚪️ نقره\n"
-                f"💰 قیمت لحظه‌ای: {format_price(price)} تومان\n"
-                f"{format_change(change)}"
-            )
-        
-        # پردازش دلار
-        if dollar_data and dollar_data.get('status') == 'success':
-            dollar = dollar_data['data']
-            price = int(dollar['price'])
-            change = dollar.get('change_percent', '0')
+            if 'usd_sell' in global_data:
+                dollar = global_data['usd_sell']
+                price = dollar.get('value', 0)
+                market_parts.append(
+                    f"💵 **دلار آمریکا**\n"
+                    f"💰 {format_price(price, is_rial=False)} تومان"
+                )
             
-            message_parts.append(
-                f"💵 دلار آمریکا\n"
-                f"💰 قیمت لحظه‌ای: {format_price(price)} تومان\n"
-                f"{format_change(change)}"
-            )
+            if 'gol18' in global_data:
+                gold = global_data['gol18']
+                price = gold.get('value', 0)
+                market_parts.append(
+                    f"🪙 **طلای ۱۸ عیار**\n"
+                    f"💰 {format_price(price, is_rial=False)} تومان"
+                )
+            
+            if 'sekeb' in global_data:
+                coin = global_data['sekeb']
+                price = coin.get('value', 0)
+                market_parts.append(
+                    f"🥇 **سکه بهار آزادی**\n"
+                    f"💰 {format_price(price, is_rial=False)} تومان"
+                )
+            
+            if market_parts:
+                message_parts.append("💱 **بازار ایران**\n\n" + "\n\n".join(market_parts))
         
         if not message_parts:
-            return None
+            if not nobitex_data:
+                logger.error("داده‌ای دریافت نشد")
+                return None
         
-        # ترکیب پیام نهایی
-        separator = "\n" + "─" * 30 + "\n\n"
-        final_message = separator.join(message_parts)
-        final_message += f"\n\n🕐 بروزرسانی: {datetime.now().strftime('%Y/%m/%d - %H:%M')}"
+        separator = "\n\n" + "═" * 25 + "\n\n"
+        
+        now = datetime.now()
+        final_message = "📊 **قیمت لحظه‌ای بازار**\n"
+        final_message += "═" * 25 + "\n\n"
+        final_message += separator.join(message_parts)
+        final_message += f"\n\n═══════════════════════════\n"
+        final_message += f"🕐 {now.strftime('%H:%M')} | 📅 {now.strftime('%Y/%m/%d')}\n"
+        final_message += f"🤖 @nsprice"
         
         return final_message
 
@@ -127,13 +176,9 @@ async def send_to_channel(client, message):
 
 async def main():
     """تابع اصلی - یکبار اجرا"""
-    # بررسی environment variables
     if not BOT_TOKEN:
         logger.error("BALE_BOT_TOKEN تنظیم نشده!")
         raise ValueError("BALE_BOT_TOKEN is required")
-    if not API_KEY:
-        logger.error("BRSAPI_KEY تنظیم نشده!")
-        raise ValueError("BRSAPI_KEY is required")
     
     client = Client(BOT_TOKEN)
     
@@ -144,11 +189,13 @@ async def main():
         message = await create_message()
         
         if message:
+            logger.info("پیام ساخته شد، در حال ارسال...")
+            logger.info(f"پیش‌نمایش:\n{message[:200]}...")
             success = await send_to_channel(client, message)
             if not success:
                 raise Exception("Failed to send message")
         else:
-            raise Exception("Could not create message")
+            raise Exception("Could not create message - no data received")
         
         logger.info("اتمام کار")
 
